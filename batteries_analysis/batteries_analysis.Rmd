@@ -1,0 +1,390 @@
+---
+title: "Analiza materiałów używanych w bateriach"
+author: "Hanna Pieniążek"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE)
+set.seed(23)
+```
+
+## Podsumowanie
+Celem projektu była analiza bazy danych materiałów wykorzystywanych w tworzeniu baterii. Zbiór danych pochodzi z Materials Project - inicjatywy naukowej Departamentu Energii USA, której celem jest
+dostarczanie otwartych danych i narzędzi do analizy materiałów. 
+
+W raporcie przedstawiono strukturę analizowanego zbioru, dokonano analizy rozkładów wartości poszczególnych zmiennych wraz z identyfikacją cech dominujących oraz wartości odstających. Zinterpretowano macierz korelacji, która wykazała silne zależności między cechami opisującymi podobne właściwości fizyczne. Stworzono model predykcyjny na podstawie algorytmu Random Forest, który osiągnął wysoką dokładność predykcji wartości w zbiorze testowym zmiennej opisującej energię wolumetryczną.
+
+## Wykorzystane biblioteki
+W projekcie zostały wykorzystane następujące biblioteki:    
+- knitr,  
+- tidyverse,  
+- kableExtra,   
+- dplyr,    
+- tidyr,    
+- ggplot2,    
+- RColorBrewer,  
+- corrplot,  
+- plotly,  
+- caret.  
+```{r libraries}
+library(knitr)
+library(tidyverse)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+library(corrplot)
+library(plotly)
+library(caret)
+```
+
+## Wczytanie i wyświetlenie danych
+Poniżej przedstawiono pierwsze 10 wierszy zbioru danych:
+``` {r loading_data, cache = TRUE, echo = TRUE}
+battery_data <- read.csv("mp_batteries.csv", fileEncoding = "UTF-8")
+kable(head(battery_data, 10))
+```
+
+## Struktura zbioru danych
+### Opis zmiennych
+Zbiór danych zawiera informacje o składzie chemicznym i parametrach wydajnościowych baterii, składa się z 4351 unikalnych rekordów opisanych 17 atrybutami:\
+- Battery ID: Identyfikator baterii, \
+- Battery Formula: Wzór chemiczny materiału baterii,   \
+- Working Ion: Główny jon, który odpowiada za transport ładunku w baterii, \
+- Formula Charge: Wzór chemiczny materiału baterii w stanie naładowanym,  \
+- Formula Discharge: Wzór chemiczny materiału baterii w stanie rozładowanym,  \
+- Max Delta Volume: Zmiana objętości w % dla danego kroku napięcia za pomocą wzoru: max(charge, discharge)/min(charge, discharge) -1, \
+- Average Voltage: Średnie napięcie dla poszczególnego kroku napięcia,  \
+- Gravimetric Capacity: Pojemność grawimetryczna, czyli ilość energii na jednostkę masy (mAh/g),  \
+- Volumetric Capacity: Pojemność wolumetryczna, czyli ilość energii na jednostkę objętości (mAh/cm³),  \
+- Gravimetric Energy: Gęstość energii w odniesieniu do masy baterii (Wh/kg),  \
+- Volumetric Energy: Gęstość energii w odniesieniu do objętości baterii (Wh/L),  \
+- Atomic Fraction Charge: Udział atomowy składników w stanie naładowanym,  \
+- Atomic Fraction Discharge: Udział atomowy składników w stanie rozładowanym,  \
+- Stability Charge: Wskaźnik stabilności materiału w stanie naładowanym,  \
+- Stability Discharge: Wskaźnik stabilności materiału w stanie rozładowanym, \
+- Steps: Liczba odrębnych kroków napięcia od pełnego naładowania do rozładowania, oparta na stabilnych stanach pośrednich, \
+- Max Voltage Step: Maksymalna bezwzględna różnica między sąsiednimi krokami napięcia.
+
+
+### Wartości brakujące
+```{r missing_values, cache=TRUE}
+missing_values <- sapply(battery_data, function(x) sum(is.na(x)))
+missing_values <- data.frame(
+  Column = names(missing_values),
+  "Number of Missing Values" = as.numeric(missing_values)
+)
+
+if (sum(missing_values$"Number of Missing Values") == 0){
+  cat("W zbiorze nie ma brakujących wartości")
+} else {
+  cat("Brakujace wartości: ")
+  kable(missing_values)
+  battery_data <- battery_data[rowSums(is.na(battery_data)) == 0, ]
+}
+
+```
+
+### Duplikaty
+```{r duplicates, cache=TRUE}
+duplicates <- battery_data[duplicated(battery_data$ColumnName), ]
+if (nrow(duplicates) == 0){
+  cat("#### W zbiorze nie ma duplikatów")
+} else {
+  cat("#### Duplikaty: ")
+  duplicates
+}
+```
+Poniżej przedstawiono typ danych oraz liczbę unikalnych wartości każdego atrybutu, a także przedziały wartości atrybutów numerycznych.
+
+### Wymiary zbioru
+```{r dimensions}
+dataset_size <- dim(battery_data)
+names(dataset_size) <- c("Rows", "Columns")
+dataset_size <- data.frame(
+  Dimension = names(dataset_size),
+  Count = as.numeric(dataset_size)
+)
+
+kable(dataset_size)%>%
+  kable_styling(full_width = F)
+```
+
+### Typy danych i liczby unikalnych wartości 
+```{r data_type_and_distinct_values, cache=TRUE}
+distinct_values <- sapply(battery_data, function(x) n_distinct(x))
+column_types <- sapply(battery_data, class)
+data_summary <- data.frame(
+  "Data Type" = column_types,
+  "Distinct values" = distinct_values
+)
+kable(data_summary)
+```
+
+``` {r basic_stats, cache = TRUE, results='asis'}
+numeric_cols <- battery_data[sapply(battery_data, is.numeric)]
+numeric_vars <- names(battery_data)[sapply(battery_data, is.numeric)]
+kable(summary(numeric_cols))
+
+```
+
+## Rozkład wartości atrybutów
+
+Poniżej przedstawiono rozkład wartości zmiennych w zbiorze danych.
+
+### Zmienne kategoryczne
+#### Working Ion
+Dla zmiennej kategorycznej Working Ion (opisującej główny jon baterii) wykorzystano wykres słupkowy, który przedstawia liczbę wystąpień poszczególnych pierwiastków. 
+Szerokość przedziałów każdego słupka została obliczona za pomocą formuły Freedmana-Diaconisa:
+$$
+\text{bin_width} = 2 \cdot \text{IQR(column)} \div \text{length(column)}^{1/3}
+$$
+Wyraźnie dominującą wartością zmiennej jest Li (głównym jonem baterii jest lit), liczba baterii o tym głównym jonie stanowi 56% całego zbioru danych. Wapń (Ca), magnez (Mg), sód (Na) oraz cynk (Zn) występują po 300-500 razy, natomiast najrzadziej w zbiorze pojawia się cez (Cs - 33 wystąpienia) oraz rubid (Rb - 50 wystąpień).
+
+
+``` {r value_distribution_ion, cache = TRUE}
+palette <- c("#21130d", "#df7d32", "#4f322a", "#e28755", "#873e23", "#7e6e54", "#fdbd53", "#8b1a00", "#ee7a41", "#cbb677")
+
+ggplotly(ggplot(battery_data, aes(x = Working.Ion, fill = Working.Ion)) +
+  geom_bar() +
+  scale_fill_manual(values = palette) +  
+  theme_minimal() +
+  labs(
+    title = "Value Distribution of Working Ion",
+    x = "Working Ion",
+    y = "Count"
+  ),
+  tooltip = c("x", "y")
+)
+```
+
+### Zmienne numeryczne
+Rozkład zmiennych numerycznych widoczny jest na poniższym wykresie. W prawym górnym rogu możliwy jest wybór z listy zmiennej do wyświetlenia.
+```{r value_distribution_numeric, cache = TRUE}
+bw <- sapply(numeric_cols, function(column) {
+  2 * IQR(column, na.rm = TRUE) / length(column)^(1/3)
+})
+
+nbinsx_values <- sapply(names(bw), function(col_name) {
+  range <- max(numeric_cols[[col_name]], na.rm = TRUE) - min(numeric_cols[[col_name]], na.rm = TRUE)
+  ceiling(range / bw[[col_name]])
+})
+
+plot <- plot_ly(
+  data = battery_data,
+  x = ~get(numeric_vars[1]),
+  type = 'histogram',
+  marker = list(color = '#df7d32',
+                line = list(
+                  color = 'black',
+                  width = 1
+    ),
+    nbinsx = nbinsx_values[[numeric_vars[1]]])
+) %>%
+  layout(
+    title = paste("Value Distribution of", numeric_vars[1]),
+    xaxis = list(title = numeric_vars[1]),
+    yaxis = list(title = "Count"),
+    updatemenus = list(
+      list(
+        buttons = lapply(seq_along(numeric_vars), function(i) {
+          list(
+            method = "update",
+            args = list(
+              list(x = list(battery_data[[numeric_vars[i]]])),
+              list(title = list(text = paste("Value Distribution of", numeric_vars[i])),
+                   xaxis = list(title = numeric_vars[i]))  
+            ),
+            label = numeric_vars[i]
+          )
+        }),
+        direction = "down",
+        x = 1,
+        y = 1,
+        showactive = TRUE
+      )
+    )
+  ) %>%
+  config(displayModeBar = TRUE)
+
+plot <- plot %>%
+  layout(
+    hoverinfo = 'x+y',  
+    showlegend = FALSE
+  )
+
+plot
+
+```
+
+#### Max Delta Volume
+Dla zmiany objętości zdecydowana większość wartości (95%) znajduje się w przedziale (-0.25 - 0.25), pozostałe przedziały są widoczne na wykresie dopiero po przybliżeniu ze względu na małą liczbę wystąpień.
+
+#### Average Voltage
+Większość wartości średniego napięcia znajduje się w przedziałach (3.2 - 3.4) oraz (3.8 - 4.0). Wykres przedstawiający rozkład posiada długi ogon z prawej strony ze względu na dwie wartości odstające (43.57 oraz 54.57).
+
+#### Gravimetric Capacity
+Dominują niskie wartości pojemności grawimetrycznej. Widoczny jest peak w przedziale 100 - 120 mAh/g, gdzie liczba wystąpień wynosi 570, co wskazuje na stosunkowo niską pojemność grawimetryczną większości materiałów.
+Około 80% osi x to bardzo niskie słupki reprezentujące przedziały po 1-2 wystąpienia per przedział.
+
+#### Volumetric Capacity
+Wykres jest silnie asymetryczny prawostronnie. Główna część obserwacji znajduje się w przedziale do 1200 mAh/cm³. Najwyższy słupek histogramu reprezentuje przedział (550 - 600 mAh/cm³), nieco niższe są słupki z przedziałami od 150 do 400 mAh/cm³.
+
+#### Gravimetric Energy
+Znacząca liczba wartości znajduje się między 0 a 1200 Wh/kg, z najwyższymi słupkami reprezentującymi przedziały (350 - 400 wystąpień) oraz (400 - 459 wystąpień). Wykres jest prawostronnie skośny ze względu na wartości odstające w okolicach 4500 i 5900 Wh/kg. 
+
+#### Volumetric Energy
+Wartości energii wolumetrycznej przyjmują głównie wartości od 0 do 5000. Prawy ogon histogramu jest bardziej wydłużony od lewego. Słupek o największej liczbie 184 obserwacji reprezentuje przedział 1200 - 1300 Wh/L. Ponadto pojawiają się wartości odstajace równe nawet ponad 18000 Wh/L. 
+
+#### Atomic Fraction Charge
+Wykres jest silnie skośny, 74% wartości znajduje się w przedziale (-0.005 - 0.005), następnie widoczny jest duży spadek do 1 wystąpienia per przedział. Pozostałe wartości są bardziej rozproszone. W dalszej części wykresu liczba wystąpień lekko rośnie do wartości około 0.14 na osi x, po czym ponownie spada.
+
+#### Atomic Fraction Discharge
+Wykres jest asymetryczny, większość danych skupia się w niższych wartościach z kilkoma wyjątkami w okolicach wartości 0.5 i 0.75. Udział atomowy składników w stanie rozładowanym jest zróżnicowany, ale z tendencją do niskich wartości, na co wskazuje dominujący przedział (0.14 - 0.15). 
+
+#### Stability Charge
+Najwięcej obserwacji znajduje się blisko wartości 0, dominujący słupek reprezentuje przedział (0.025-0.075). Pozostałe wartości są rozłożone bardziej równomiernie w dalszej części wykresu.
+Występuje tu silna skośność prawostronna. 
+
+#### Stability Discharge
+Dla stanu rozładowanego większość danych skoncentrowana jest w niskich wartościach, podobnie jak w przypadku wskaźnika stabilności materiału w stanie naładowanym. Ponad 1/3 obserwacji zawiera się w przedziale (0.025 - 0.075). Wartości większe od 1 pojawiają się rzadko, maksymalnie 4 na przedział, liczba wystąpień maleje wraz ze wzrostem wskaźnika stabilności.
+
+#### Steps
+
+Dominującą wartością zmiennej Steps jest 1, które stanowi 86% baterii z analizowanego zbioru. Z każdą kolejną wartością liczba obserwacji maleje kilkukrotnie. Wartość 2 występuje 7 razy mniej niż wartość 1, natomiast wartość 6 występuje w zbiorze tylko raz.
+
+#### Max Voltage Step
+74% wartości znajduje się w przedziale od -0.005 do -0.00499. Reszta obserwacji (z wyjątkiem outlierów w okolicach wartości 8.5 oraz 27) przyjmuje wartości do 4, co wskazuje na to, że bezwzględne różnice między sąsiednimi krokami napięcia sa niewielkie.
+
+
+
+## Korelacje
+
+### Macierz korelacji
+Macierz korelacji pokazuje zależności między atrybutami numerycznymi. Wartości na przecięciach kolumn i wierszy oznaczają korelację między tymi dwoma cechami i przyjmują wartości w przedziale od -1 do 1, gdzie wartości z przedziału (0,1] oznaczają dodatnią korelację, 0 - całkowity brak korelacji, a w przedziale [-1;0) - ujemną korelację. 
+
+``` {r correlation_matrix, cache = TRUE}
+correlation_matrix <- battery_data %>%
+  select(numeric_vars) %>%
+  cor
+
+corrplot(correlation_matrix, 
+         method = "color", 
+         type = "upper",
+         addCoef.col = "black",
+         tl.col = "black", 
+         tl.srt = 45, 
+         cl.lim = c(-1, 1),
+         diag = FALSE, 
+         number.cex = 0.55,       
+         mar = c(0, 0, 1, 0),
+         col = colorRampPalette(c("#803c14", "beige", "darkgreen"))(200)
+)
+
+
+```
+
+### Najsilniejsze korelacje
+Można zauważyć, że istnieją silne zależności między zmiennymi opisującymi podobne zjawiska fizyczne.
+Najsilniejsza dodatnia korelacja (0.93) jest między Gravimetric Energy oraz Volumetric Energy, które opisują gęstość energii w odniesieniu do odpowiednio masy i objętości baterii. 
+
+Podobnie wygląda to w przypadku, również silnej, korelacji między Gravimetric.Capacity a Volumetric.Capacity wynoszącej 0.86. Obie zmienne odnoszą się do ilości energii:  na jednostkę masy (pojemność grawimetryczna) i na jednostkę objętości (pojemność wolumetryczna).
+
+Niewiele słabsza (0.80) jest zależność między Stability.Charge i Stability.Discharge, co wskazuje na to, że stabilność materiału w stanie naładowanym i rozładowanym są mocno powiązane.
+Poniżej przedstawiono wykresy obrazujące opisane korelacje.
+
+``` {r high_corelation}
+energy <- ggplot(battery_data, aes(x = Gravimetric.Energy, y = Volumetric.Energy)) +
+  geom_point(color = "darkgreen", alpha = 0.6) +
+  geom_smooth(method = "lm", color = "black", se = FALSE) +
+  labs(
+    title = "Correlation between gravimetric energy and volumetric energy (0.93)",
+    x = "Gravimetric.Energy",
+    y = "Volumetric.Energy"
+  ) +
+  theme_minimal()
+
+capacity <- ggplot(battery_data, aes(x = Gravimetric.Capacity, y = Volumetric.Capacity)) +
+  geom_point(color = "darkgreen", alpha = 0.6) +
+  geom_smooth(method = "lm", color = "black", se = FALSE) +
+  labs(
+    title = "Correlation between gravimetric capacity and volumetric capacity (0.86)",
+    x = "Gravimetric.Capacity",
+    y = "Volumetric.Capacity"
+  ) +
+  theme_minimal()
+
+stability <- ggplot(battery_data, aes(x = Stability.Charge, y = Stability.Discharge)) +
+  geom_point(color = "darkgreen", alpha = 0.6) +
+  geom_smooth(method = "lm", color = "black", se = FALSE) +
+  labs(
+    title = "Correlation between stability of the material when charged and discharged (0.80)",
+    x = "Stability.Charge",
+    y = "Stability.Discharge"
+  ) +
+  theme_minimal()
+
+print(energy)
+print(capacity)
+print(stability)
+
+```
+
+## Model predykcyjny
+W celu analizy danych w zbiorze przeprowadzono predykcję zmiennej Volumetric.Energy. Dane podzielono na zbiór treningowy (72.5% danych) i zbiór testowy (27.5%). 
+Do trenowania modelu wykorzystano algorytm Random Forest z 10 drzewami decyzyjnymi, natomiast do oceny modelu użyto 10-krotnej walidacji krzyżowej.
+
+Model osiągnął najlepsze wyniki dla liczby predyktorów uwzględnianych przy każdym podziale w drzewach (mtry) równej 11. 
+Optymalny model został wybrany na podstawie najniższej  wartości RMSE (Root Mean Square Error — pierwiastek z błędu średniokwadratowego) równej ok. 210.47. Ponadto współczynnik determinacji \( R^2 \) wyniósł 0.968, co wskazuje, że model wyjaśnia 96,8% zmienności zmiennej celu. Średni błąd bezwzględny (MAE) dodatkowo potwierdził wysoką dokładność predykcji.
+  
+```{r prediction_model, cache=TRUE}
+
+numeric_cols = battery_data[, numeric_vars] 
+
+training_data <- createDataPartition(numeric_cols$Volumetric.Energy, p = 0.725, list = FALSE)
+train <- numeric_cols[training_data, ]
+test <- numeric_cols[-training_data, ]
+
+ctrl <- trainControl(
+    method = "cv",
+    number = 10)
+
+model <- train(Volumetric.Energy ~ .,
+             data = train,
+             method = "rf",
+             trControl = ctrl,
+             ntree = 10)
+model
+
+ggplot(model) + theme_bw()
+
+```
+
+## Predykcja
+
+Aby sprawdzić, jak dobrze model wypada na nowych danych, dokonano oceny jego wydajności na zbiorze testowym.
+Model bardzo dobrze dopasował się do danych osiągając wysoką jakość predykcji na zbiorze testowym. 
+Pomimo, że wartości miar RMSE (238.86) oraz MAE (90.33) były nieco wyższe, a współczynnika determinacji (\( R^2 \) = 0.9716) niższa w porównaniu do wyników walidacji (co oznacza nieco gorsze dopasowanie), są to niewielkie różnice.
+Model wciąż zapewnia trafne predykcje, co potwierdza między innymi wysoka wartość współczynnika determinacji. Oznacza to, że model wyjaśnia 97.16% zmienności w danych testowych.
+Otrzymane wyniki sugerują, że model charakteryzuje się zarówno wysoką dokładnością, jak i zdolnością do generalizacji.
+
+```{r predict, cache=TRUE}
+predictions <- predict(model, newdata = test)
+metrics <- postResample(predictions, test$Volumetric.Energy)
+
+metrics
+```
+
+
+
+
